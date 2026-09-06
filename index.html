@@ -1,0 +1,1163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Universal SWF Player: Ephemeral & Non-Persistent</title>
+  
+  <!-- ActionScript Fallback Engine (Prevents crashes on missing external interfaces) -->
+  <script>
+    (function() {
+      const flashStubs = [
+        'FlashLoaded', 'onFlashReady', 'sendToJavaScript', 'receiveFromFlash',
+        'getFlashMovie', 'flashInit', 'c2call', 'gameLoaded', 'db_get', 'db_set'
+      ];
+
+      flashStubs.forEach(stub => {
+        if (!window[stub]) {
+          window[stub] = function(...args) {
+            console.warn(`[SWF Interceptor] Handled missing ActionScript call: ${stub}()`, args);
+            return true;
+          };
+        }
+      });
+
+      window.ActionScriptGuard = new Proxy(window, {
+        get(target, prop) {
+          if (prop in target) {
+            return target[prop];
+          }
+          console.warn(`[SWF Interceptor] Dynamically stubbed missing function: window.${String(prop)}()`);
+          return function() { return true; };
+        }
+      });
+    })();
+  </script>
+
+  <!-- Mobile Developer Console Engine (Eruda) -->
+  <script src="https://cdn.jsdelivr.net/npm/eruda" crossorigin="anonymous"></script>
+
+  <!-- WebAssembly Engine: Ruffle -->
+  <script src="./ruffle/ruffle.js"></script>
+
+  <!-- Pure JavaScript Native Engine: swf2js -->
+  <script src="https://cdn.jsdelivr.net/gh/swf2js/swf2js@master/swf2js.js" crossorigin="anonymous"></script>
+
+  <style>
+    :root {
+      --bg-color: #090d16;
+      --card-bg: #111827;
+      --accent-color: #38bdf8;
+      --accent-glow: rgba(56, 189, 248, 0.4);
+      --purple-accent: #c084fc;
+      --text-color: #f8fafc;
+      --border-color: rgba(255, 255, 255, 0.12);
+      --key-bg-top: #1f293d;
+      --key-bg-bottom: #111827;
+      --key-border: #030712;
+    }
+
+    body {
+      margin: 0;
+      padding: 0;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background-color: var(--bg-color);
+      color: var(--text-color);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+      touch-action: manipulation;
+      user-select: none;
+      -webkit-user-select: none;
+      overflow-x: hidden;
+    }
+
+    /* -------------------------------------- */
+    /* STARTUP LAUNCHER GUI MODAL             */
+    /* -------------------------------------- */
+    #startup-gui {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(9, 13, 22, 0.85);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      z-index: 9999;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: opacity 0.3s ease;
+    }
+
+    .gui-card {
+      background: var(--card-bg);
+      border: 1px solid rgba(56, 189, 248, 0.3);
+      border-radius: 16px;
+      padding: 2rem;
+      width: 90%;
+      max-width: 500px;
+      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.8), inset 0 0 20px rgba(56, 189, 248, 0.05);
+      display: flex;
+      flex-direction: column;
+      gap: 1.25rem;
+    }
+
+    .gui-card h2 {
+      margin: 0;
+      text-align: center;
+      background: linear-gradient(135deg, var(--accent-color), var(--purple-accent));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      font-size: 1.8rem;
+    }
+
+    .file-drop-zone {
+      border: 2px dashed #374151;
+      border-radius: 12px;
+      padding: 2rem 1rem;
+      text-align: center;
+      background: #1f293d;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .file-drop-zone:hover, .file-drop-zone.dragover {
+      border-color: var(--accent-color);
+      background: rgba(56, 189, 248, 0.05);
+    }
+
+    .file-drop-zone p {
+      margin: 0;
+      color: #94a3b8;
+      font-weight: 600;
+    }
+
+    .gui-setting {
+      display: flex;
+      flex-direction: column;
+      gap: 0.4rem;
+    }
+
+    .gui-setting label {
+      font-size: 0.85rem;
+      color: #94a3b8;
+      font-weight: 600;
+    }
+
+    .gui-select {
+      background: #090d16;
+      color: var(--text-color);
+      border: 1px solid var(--border-color);
+      padding: 0.75rem;
+      border-radius: 8px;
+      font-size: 0.95rem;
+      outline: none;
+      cursor: pointer;
+    }
+
+    .gui-select:focus {
+      border-color: var(--accent-color);
+    }
+
+    .btn-launch {
+      background: linear-gradient(135deg, var(--accent-color), #0284c7);
+      color: #090d16;
+      border: none;
+      padding: 1rem;
+      border-radius: 8px;
+      font-size: 1.1rem;
+      font-weight: bold;
+      cursor: pointer;
+      box-shadow: 0 0 15px var(--accent-glow);
+      transition: all 0.2s ease;
+      margin-top: 0.5rem;
+    }
+
+    .btn-launch:hover {
+      filter: brightness(1.2);
+      transform: translateY(-2px);
+    }
+
+    .btn-launch:disabled {
+      background: #374151;
+      color: #94a3b8;
+      box-shadow: none;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    /* -------------------------------------- */
+    /* MAIN PLAYER UI                         */
+    /* -------------------------------------- */
+    header {
+      margin-top: 1.25rem;
+      text-align: center;
+    }
+
+    header h1 {
+      margin: 0;
+      font-size: 1.8rem;
+      letter-spacing: -0.025em;
+      background: linear-gradient(135deg, var(--accent-color), var(--purple-accent));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .main-container {
+      width: 100%;
+      max-width: 1280px;
+      padding: 1rem;
+      box-sizing: border-box;
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: center;
+      gap: 0.75rem;
+      background: var(--card-bg);
+      padding: 0.85rem 1.25rem;
+      border-radius: 12px;
+      border: 1px solid var(--border-color);
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+    }
+
+    .tool-group {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      flex-wrap: wrap;
+    }
+
+    .btn {
+      background: linear-gradient(135deg, var(--accent-color), #0284c7);
+      color: #090d16;
+      font-weight: 700;
+      padding: 0.55rem 1rem;
+      border-radius: 8px;
+      border: none;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      font-size: 0.85rem;
+      transition: all 0.2s ease;
+      box-shadow: 0 0 10px var(--accent-glow);
+    }
+
+    .btn:hover {
+      filter: brightness(1.15);
+      transform: translateY(-1px);
+    }
+
+    .btn-reset {
+      background: #1f293d;
+      color: var(--text-color);
+      box-shadow: none;
+    }
+
+    .btn-reset:hover {
+      background: #374151;
+    }
+
+    .btn-restart {
+      background: linear-gradient(135deg, #10b981, #059669);
+      color: #090d16;
+      box-shadow: 0 0 10px rgba(16, 185, 129, 0.3);
+    }
+
+    .btn-restart:hover {
+      filter: brightness(1.15);
+    }
+
+    .checkbox-label {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: #94a3b8;
+      cursor: pointer;
+      background: #090d16;
+      padding: 0.45rem 0.75rem;
+      border-radius: 8px;
+      border: 1px solid var(--border-color);
+      transition: all 0.2s ease;
+    }
+
+    .checkbox-label:hover {
+      border-color: var(--accent-color);
+      color: var(--text-color);
+    }
+
+    .checkbox-label input[type="checkbox"] {
+      accent-color: var(--accent-color);
+      width: 16px;
+      height: 16px;
+      cursor: pointer;
+    }
+
+    .control-mode-toggle {
+      display: flex;
+      background: #090d16;
+      padding: 4px;
+      border-radius: 8px;
+      gap: 4px;
+      border: 1px solid var(--border-color);
+      flex-wrap: wrap;
+    }
+
+    .toggle-btn {
+      background: transparent;
+      border: none;
+      color: #94a3b8;
+      padding: 0.45rem 0.75rem;
+      font-size: 0.8rem;
+      font-weight: 600;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .toggle-btn.active {
+      background: var(--card-bg);
+      color: var(--accent-color);
+      box-shadow: 0 0 8px var(--accent-glow);
+    }
+
+    .key-meter {
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: #94a3b8;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .meter-badge {
+      background: #090d16;
+      padding: 2px 8px;
+      border-radius: 12px;
+      border: 1px solid var(--border-color);
+      color: var(--accent-color);
+    }
+
+    .player-wrapper {
+      background: var(--card-bg);
+      border-radius: 12px;
+      padding: 0.75rem;
+      box-shadow: 0 20px 30px -10px rgba(0, 0, 0, 0.7);
+      border: 1px solid var(--border-color);
+      aspect-ratio: 4 / 3;
+      width: 100%;
+      box-sizing: border-box;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .engine-target {
+      width: 100%;
+      height: 100%;
+      border-radius: 8px;
+      overflow: hidden;
+      display: none;
+    }
+
+    .engine-target.active {
+      display: block;
+    }
+
+    #native-js-container canvas {
+      image-rendering: -webkit-optimize-contrast;
+      image-rendering: crisp-edges;
+      image-rendering: pixelated;
+    }
+
+    .controls-wrapper {
+      background: var(--card-bg);
+      border-radius: 12px;
+      padding: 1rem;
+      border: 1px solid var(--border-color);
+      box-shadow: 0 10px 20px -5px rgba(0, 0, 0, 0.4);
+    }
+
+    .view-panel {
+      display: none;
+    }
+
+    .view-panel.active {
+      display: block;
+    }
+
+    #console-panel {
+      width: 100%;
+      height: 480px;
+      border-radius: 8px;
+      overflow: hidden;
+      background: #000;
+      position: relative;
+    }
+
+    #eruda-container {
+      width: 100%;
+      height: 100%;
+    }
+
+    .vk-btn {
+      background: linear-gradient(180deg, var(--key-bg-top) 0%, var(--key-bg-bottom) 100%);
+      color: var(--text-color);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-bottom: 3px solid var(--key-border);
+      border-radius: 6px;
+      font-weight: 700;
+      font-size: 0.75rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      touch-action: none;
+      box-shadow: 0 2px 4px rgba(0, 0, 0, 0.5);
+      transition: background 0.05s ease, transform 0.05s ease;
+    }
+
+    .vk-btn:hover {
+      border-color: var(--accent-color);
+      color: var(--accent-color);
+    }
+
+    .vk-btn.pressed {
+      background: linear-gradient(135deg, var(--accent-color), var(--purple-accent)) !important;
+      color: #090d16 !important;
+      transform: translateY(2px);
+      border-bottom: 1px solid var(--key-border);
+      box-shadow: 0 0 12px var(--accent-glow);
+    }
+
+    .pc-keyboard {
+      display: flex;
+      gap: 12px;
+      max-width: 1200px;
+      margin: 0 auto;
+      overflow-x: auto;
+      padding-bottom: 4px;
+    }
+
+    .kb-section { display: flex; flex-direction: column; gap: 6px; }
+    .kb-main { flex: 3; }
+    .kb-cluster { flex: 0.8; }
+    .kb-numpad { flex: 1.2; }
+    .kb-row { display: flex; gap: 6px; width: 100%; }
+    .kb-key { flex: 1; height: 42px; min-width: 0; }
+    .k-wide-1_2 { flex: 1.2; }
+    .k-wide-1_5 { flex: 1.5; }
+    .k-wide-2   { flex: 2; }
+    .k-wide-2_5 { flex: 2.5; }
+    .k-space    { flex: 5; }
+    .k-accent { color: var(--accent-color); }
+
+    .dpad-container {
+      display: flex;
+      justify-content: space-around;
+      align-items: center;
+      gap: 2rem;
+      max-width: 500px;
+      margin: 0 auto;
+      touch-action: none;
+    }
+
+    .dpad-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 55px);
+      grid-template-rows: repeat(3, 55px);
+      gap: 6px;
+    }
+
+    .dpad-up    { grid-column: 2; grid-row: 1; }
+    .dpad-left  { grid-column: 1; grid-row: 2; }
+    .dpad-right { grid-column: 3; grid-row: 2; }
+    .dpad-down  { grid-column: 2; grid-row: 3; }
+    .dpad-center{ grid-column: 2; grid-row: 2; background: #111827; border: none; cursor: default; }
+
+    .action-group { display: flex; gap: 1rem; }
+    .action-btn { width: 60px; height: 60px; border-radius: 50%; font-size: 0.75rem; }
+
+    .keybind-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 1rem;
+      margin-bottom: 1.25rem;
+    }
+
+    .keybind-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: #090d16;
+      padding: 0.6rem 0.85rem;
+      border-radius: 8px;
+      border: 1px solid var(--border-color);
+    }
+
+    .keybind-label { font-size: 0.85rem; font-weight: 600; }
+
+    .keybind-input-btn {
+      background: #1f293d;
+      color: var(--accent-color);
+      border: 1px solid var(--border-color);
+      padding: 0.35rem 0.75rem;
+      border-radius: 6px;
+      font-weight: bold;
+      cursor: pointer;
+      font-size: 0.8rem;
+      min-width: 70px;
+      text-align: center;
+    }
+
+    .keybind-input-btn.listening {
+      background: var(--accent-color);
+      color: #090d16;
+      animation: pulse 1s infinite alternate;
+    }
+
+    @keyframes pulse {
+      from { opacity: 0.7; }
+      to { opacity: 1; }
+    }
+
+    .settings-footer { display: flex; justify-content: flex-end; gap: 0.75rem; }
+    .eruda-entry-btn { display: none !important; }
+  </style>
+</head>
+<body>
+
+  <!-- STARTUP GUI OVERLAY -->
+  <div id="startup-gui">
+    <div class="gui-card">
+      <h2>SWF Engine Launcher</h2>
+      
+      <div class="file-drop-zone" id="gui-drop-zone" onclick="document.getElementById('gui-file-input').click()">
+        <p id="gui-file-label">📥 Click or Drop your .SWF file here</p>
+        <input type="file" id="gui-file-input" accept=".swf" style="display: none;">
+      </div>
+
+      <div class="gui-setting">
+        <label for="engine-selector">Select Execution Engine</label>
+        <select id="engine-selector" class="gui-select">
+          <option value="ruffle">Ruffle (WebAssembly Engine) - Clean Memory Mode</option>
+          <option value="native-js">swf2js (Pure Native JavaScript Engine) - High Speed</option>
+        </select>
+      </div>
+
+      <div class="gui-setting">
+        <label for="quality-selector">Render Quality Optimization</label>
+        <select id="quality-selector" class="gui-select">
+          <option value="high">High (Anti-aliased)</option>
+          <option value="low">Low (Maximum Performance)</option>
+        </select>
+      </div>
+
+      <button id="btn-start-engine" class="btn-launch" disabled>Launch Clean Player</button>
+    </div>
+  </div>
+
+  <header>
+    <h1>Flash Web Player</h1>
+  </header>
+
+  <div class="main-container">
+    <div class="toolbar">
+      <div class="tool-group">
+        <button class="btn btn-reset" onclick="openLauncherGUI()">
+          ⚙️ Change Engine / SWF
+        </button>
+
+        <button class="btn btn-restart" onclick="restartWithFreshSession()" title="Restarts execution in a 100% clean memory space">
+          ⚡ Restart Clean Session
+        </button>
+
+        <label class="checkbox-label" title="Enable to allow Flash ActionScript communication with JavaScript">
+          <input type="checkbox" id="allow-script-access-toggle" checked onchange="toggleScriptAccess(this.checked)">
+          <span>AllowScriptAccess</span>
+        </label>
+      </div>
+
+      <div class="key-meter">
+        Active Keys: <span class="meter-badge" id="active-key-count">0 / 4</span>
+      </div>
+
+      <div class="control-mode-toggle">
+        <button class="toggle-btn active" onclick="switchControlMode('keyboard', event)">Full Keyboard</button>
+        <button class="toggle-btn" onclick="switchControlMode('dpad', event)">D-Pad Mode</button>
+        <button class="toggle-btn" onclick="switchControlMode('settings', event)">⚙️ Keybinds</button>
+        <button class="toggle-btn" onclick="switchControlMode('console', event)">🛠️ DevTools</button>
+        <button class="toggle-btn" onclick="switchControlMode('none', event)">Off</button>
+      </div>
+    </div>
+
+    <!-- Dual-Engine Flash Player Containers -->
+    <div class="player-wrapper">
+      <div id="ruffle-container" class="engine-target"></div>
+      <div id="native-js-container" class="engine-target"></div>
+    </div>
+
+    <!-- Controls Wrapper -->
+    <div class="controls-wrapper" id="controls-wrapper">
+      
+      <!-- Full Abstract Keyboard -->
+      <div id="keyboard-panel" class="view-panel active">
+        <div class="pc-keyboard">
+          <div class="kb-section kb-main">
+            <!-- Row 1 -->
+            <div class="kb-row">
+              <button class="vk-btn kb-key k-wide-1_5" data-key="Escape" data-code="Escape" data-keycode="27">ESC</button>
+              <button class="vk-btn kb-key" data-key="1" data-code="Digit1" data-keycode="49">1</button>
+              <button class="vk-btn kb-key" data-key="2" data-code="Digit2" data-keycode="50">2</button>
+              <button class="vk-btn kb-key" data-key="3" data-code="Digit3" data-keycode="51">3</button>
+              <button class="vk-btn kb-key" data-key="4" data-code="Digit4" data-keycode="52">4</button>
+              <button class="vk-btn kb-key" data-key="5" data-code="Digit5" data-keycode="53">5</button>
+              <button class="vk-btn kb-key" data-key="6" data-code="Digit6" data-keycode="54">6</button>
+              <button class="vk-btn kb-key" data-key="7" data-code="Digit7" data-keycode="55">7</button>
+              <button class="vk-btn kb-key" data-key="8" data-code="Digit8" data-keycode="56">8</button>
+              <button class="vk-btn kb-key" data-key="9" data-code="Digit9" data-keycode="57">9</button>
+              <button class="vk-btn kb-key" data-key="0" data-code="Digit0" data-keycode="48">0</button>
+              <button class="vk-btn kb-key k-wide-1_5" data-key="Backspace" data-code="Backspace" data-keycode="8">⌫ BKSP</button>
+            </div>
+            <!-- Row 2 -->
+            <div class="kb-row">
+              <button class="vk-btn kb-key k-wide-1_5" data-key="Tab" data-code="Tab" data-keycode="9">TAB</button>
+              <button class="vk-btn kb-key" data-key="q" data-code="KeyQ" data-keycode="81">Q</button>
+              <button class="vk-btn kb-key" data-key="w" data-code="KeyW" data-keycode="87">W</button>
+              <button class="vk-btn kb-key" data-key="e" data-code="KeyE" data-keycode="69">E</button>
+              <button class="vk-btn kb-key" data-key="r" data-code="KeyR" data-keycode="82">R</button>
+              <button class="vk-btn kb-key" data-key="t" data-code="KeyT" data-keycode="84">T</button>
+              <button class="vk-btn kb-key" data-key="y" data-code="KeyY" data-keycode="89">Y</button>
+              <button class="vk-btn kb-key" data-key="u" data-code="KeyU" data-keycode="85">U</button>
+              <button class="vk-btn kb-key" data-key="i" data-code="KeyI" data-keycode="73">I</button>
+              <button class="vk-btn kb-key" data-key="o" data-code="KeyO" data-keycode="79">O</button>
+              <button class="vk-btn kb-key" data-key="p" data-code="KeyP" data-keycode="80">P</button>
+            </div>
+            <!-- Row 3 -->
+            <div class="kb-row">
+              <button class="vk-btn kb-key k-wide-2" data-key="CapsLock" data-code="CapsLock" data-keycode="20">CAPS</button>
+              <button class="vk-btn kb-key" data-key="a" data-code="KeyA" data-keycode="65">A</button>
+              <button class="vk-btn kb-key" data-key="s" data-code="KeyS" data-keycode="83">S</button>
+              <button class="vk-btn kb-key" data-key="d" data-code="KeyD" data-keycode="68">D</button>
+              <button class="vk-btn kb-key" data-key="f" data-code="KeyF" data-keycode="70">F</button>
+              <button class="vk-btn kb-key" data-key="g" data-code="KeyG" data-keycode="71">G</button>
+              <button class="vk-btn kb-key" data-key="h" data-code="KeyH" data-keycode="72">H</button>
+              <button class="vk-btn kb-key" data-key="j" data-code="KeyJ" data-keycode="74">J</button>
+              <button class="vk-btn kb-key" data-key="k" data-code="KeyK" data-keycode="75">K</button>
+              <button class="vk-btn kb-key" data-key="l" data-code="KeyL" data-keycode="76">L</button>
+              <button class="vk-btn kb-key k-wide-2" data-key="Enter" data-code="Enter" data-keycode="13">ENTER</button>
+            </div>
+            <!-- Row 4 -->
+            <div class="kb-row">
+              <button class="vk-btn kb-key k-wide-2_5" data-key="Shift" data-code="ShiftLeft" data-keycode="16">SHIFT</button>
+              <button class="vk-btn kb-key" data-key="z" data-code="KeyZ" data-keycode="90">Z</button>
+              <button class="vk-btn kb-key" data-key="x" data-code="KeyX" data-keycode="88">X</button>
+              <button class="vk-btn kb-key" data-key="c" data-code="KeyC" data-keycode="67">C</button>
+              <button class="vk-btn kb-key" data-key="v" data-code="KeyV" data-keycode="86">V</button>
+              <button class="vk-btn kb-key" data-key="b" data-code="KeyB" data-keycode="66">B</button>
+              <button class="vk-btn kb-key" data-key="n" data-code="KeyN" data-keycode="78">N</button>
+              <button class="vk-btn kb-key" data-key="m" data-code="KeyM" data-keycode="77">M</button>
+              <button class="vk-btn kb-key" data-key="ArrowUp" data-code="ArrowUp" data-keycode="38">▲</button>
+              <button class="vk-btn kb-key k-wide-2_5" data-key="Shift" data-code="ShiftRight" data-keycode="16">SHIFT</button>
+            </div>
+            <!-- Row 5 -->
+            <div class="kb-row">
+              <button class="vk-btn kb-key k-wide-1_5" data-key="Control" data-code="ControlLeft" data-keycode="17">CTRL</button>
+              <button class="vk-btn kb-key k-wide-1_5" data-key="Alt" data-code="AltLeft" data-keycode="18">ALT</button>
+              <button class="vk-btn kb-key k-space" data-key=" " data-code="Space" data-keycode="32">SPACE</button>
+              <button class="vk-btn kb-key" data-key="ArrowLeft" data-code="ArrowLeft" data-keycode="37">◄</button>
+              <button class="vk-btn kb-key" data-key="ArrowDown" data-code="ArrowDown" data-keycode="40">▼</button>
+              <button class="vk-btn kb-key" data-key="ArrowRight" data-code="ArrowRight" data-keycode="39">►</button>
+            </div>
+          </div>
+
+          <div class="kb-section kb-cluster">
+            <div class="kb-row">
+              <button class="vk-btn kb-key k-accent" data-key="Insert" data-code="Insert" data-keycode="45">INS</button>
+              <button class="vk-btn kb-key k-accent" data-key="Home" data-code="Home" data-keycode="36">HOME</button>
+            </div>
+            <div class="kb-row">
+              <button class="vk-btn kb-key k-accent" data-key="Delete" data-code="Delete" data-keycode="46">DEL</button>
+              <button class="vk-btn kb-key k-accent" data-key="End" data-code="End" data-keycode="35">END</button>
+            </div>
+            <div class="kb-row">
+              <button class="vk-btn kb-key k-accent" data-key="PageUp" data-code="PageUp" data-keycode="33">PG UP</button>
+              <button class="vk-btn kb-key k-accent" data-key="PageDown" data-code="PageDown" data-keycode="34">PG DN</button>
+            </div>
+          </div>
+
+          <div class="kb-section kb-numpad">
+            <div class="kb-row">
+              <button class="vk-btn kb-key k-accent" data-key="NumLock" data-code="NumLock" data-keycode="144">NUM</button>
+              <button class="vk-btn kb-key k-accent" data-key="/" data-code="NumpadDivide" data-keycode="111">/</button>
+              <button class="vk-btn kb-key k-accent" data-key="*" data-code="NumpadMultiply" data-keycode="106">*</button>
+              <button class="vk-btn kb-key k-accent" data-key="-" data-code="NumpadSubtract" data-keycode="109">-</button>
+            </div>
+            <div class="kb-row">
+              <button class="vk-btn kb-key" data-key="7" data-code="Numpad7" data-keycode="103">7</button>
+              <button class="vk-btn kb-key" data-key="8" data-code="Numpad8" data-keycode="104">8</button>
+              <button class="vk-btn kb-key" data-key="9" data-code="Numpad9" data-keycode="105">9</button>
+              <button class="vk-btn kb-key k-accent" data-key="+" data-code="NumpadAdd" data-keycode="107">+</button>
+            </div>
+            <div class="kb-row">
+              <button class="vk-btn kb-key" data-key="4" data-code="Numpad4" data-keycode="100">4</button>
+              <button class="vk-btn kb-key" data-key="5" data-code="Numpad5" data-keycode="101">5</button>
+              <button class="vk-btn kb-key" data-key="6" data-code="Numpad6" data-keycode="102">6</button>
+              <button class="vk-btn kb-key k-accent" data-key="Enter" data-code="NumpadEnter" data-keycode="13">ENT</button>
+            </div>
+            <div class="kb-row">
+              <button class="vk-btn kb-key" data-key="1" data-code="Numpad1" data-keycode="97">1</button>
+              <button class="vk-btn kb-key" data-key="2" data-code="Numpad2" data-keycode="98">2</button>
+              <button class="vk-btn kb-key" data-key="3" data-code="Numpad3" data-keycode="99">3</button>
+              <button class="vk-btn kb-key" data-key="." data-code="NumpadDecimal" data-keycode="110">.</button>
+            </div>
+            <div class="kb-row">
+              <button class="vk-btn kb-key k-wide-2" data-key="0" data-code="Numpad0" data-keycode="96">0</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- D-Pad Panel -->
+      <div id="dpad-panel" class="view-panel">
+        <div class="dpad-container">
+          <div class="dpad-grid">
+            <button class="vk-btn dpad-up" data-bind="Up">▲</button>
+            <button class="vk-btn dpad-left" data-bind="Left">◄</button>
+            <div class="dpad-center"></div>
+            <button class="vk-btn dpad-right" data-bind="Right">►</button>
+            <button class="vk-btn dpad-down" data-bind="Down">▼</button>
+          </div>
+
+          <div class="action-group">
+            <button class="vk-btn action-btn" data-bind="ActionA">SPACE</button>
+            <button class="vk-btn action-btn" data-bind="ActionB">ENTER</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Keybind Settings Panel -->
+      <div id="settings-panel" class="view-panel">
+        <div class="keybind-grid">
+          <div class="keybind-row">
+            <span class="keybind-label">D-Pad Up</span>
+            <button class="keybind-input-btn" onclick="listenForKeybind('Up', this)" id="bind-Up">ArrowUp</button>
+          </div>
+          <div class="keybind-row">
+            <span class="keybind-label">D-Pad Down</span>
+            <button class="keybind-input-btn" onclick="listenForKeybind('Down', this)" id="bind-Down">ArrowDown</button>
+          </div>
+          <div class="keybind-row">
+            <span class="keybind-label">D-Pad Left</span>
+            <button class="keybind-input-btn" onclick="listenForKeybind('Left', this)" id="bind-Left">ArrowLeft</button>
+          </div>
+          <div class="keybind-row">
+            <span class="keybind-label">D-Pad Right</span>
+            <button class="keybind-input-btn" onclick="listenForKeybind('Right', this)" id="bind-Right">ArrowRight</button>
+          </div>
+          <div class="keybind-row">
+            <span class="keybind-label">Action Button A</span>
+            <button class="keybind-input-btn" onclick="listenForKeybind('ActionA', this)" id="bind-ActionA">Space</button>
+          </div>
+          <div class="keybind-row">
+            <span class="keybind-label">Action Button B</span>
+            <button class="keybind-input-btn" onclick="listenForKeybind('ActionB', this)" id="bind-ActionB">Enter</button>
+          </div>
+        </div>
+
+        <div class="settings-footer">
+          <button class="btn btn-reset" onclick="resetDefaultKeybinds()">Restore Defaults</button>
+        </div>
+      </div>
+
+      <!-- Dedicated DevTools Console Panel -->
+      <div id="console-panel" class="view-panel">
+        <div id="eruda-container"></div>
+      </div>
+
+    </div>
+  </div>
+
+  <script>
+    // --- Engine State Management ---
+    let activeEngineMode = 'ruffle'; 
+    let currentSwfFile = null;
+    let currentSwfDataUrl = null;
+    let currentSwfBuffer = null;
+    
+    // --- Ruffle Specific ---
+    let rufflePlayer = null;
+    let isScriptAccessAllowed = true;
+    let activeSessionKey = generateSessionToken(); // Ephemeral Session Token
+    
+    // --- Utils ---
+    let erudaInitialized = false;
+    let isLoadingSwf = false;
+
+    // --- Keybind Maps ---
+    const MAX_CONCURRENT_KEYS = 4;
+    const activeKeyCodes = new Set();
+    const activePointerMap = new Map();
+
+    const DEFAULT_KEYBINDS = {
+      Up: { key: "ArrowUp", code: "ArrowUp", keyCode: 38 },
+      Down: { key: "ArrowDown", code: "ArrowDown", keyCode: 40 },
+      Left: { key: "ArrowLeft", code: "ArrowLeft", keyCode: 37 },
+      Right: { key: "ArrowRight", code: "ArrowRight", keyCode: 39 },
+      ActionA: { key: " ", code: "Space", keyCode: 32 },
+      ActionB: { key: "Enter", code: "Enter", keyCode: 13 }
+    };
+    let customKeybinds = JSON.parse(JSON.stringify(DEFAULT_KEYBINDS));
+
+    function generateSessionToken() {
+      return 'session_clean_' + Math.random().toString(36).substr(2, 9) + '_' + Date.now();
+    }
+
+    window.addEventListener("DOMContentLoaded", () => {
+      // Global Ruffle Configuration explicitly set for 100% ephemeral state
+      window.RufflePlayer = window.RufflePlayer || {};
+      window.RufflePlayer.config = {
+        autoplay: "on",
+        unmuteOverlay: "rendered",
+        letterbox: "on",
+        forceScale: true,
+        quality: "high",
+        wmode: "direct",
+        preloader: false,
+        allowScriptAccess: true,
+        isolatedStorage: false, // Disables persistent disk writes
+        sandbox: 3              // Restricts local storage read/writes
+      };
+
+      const guiFileInput = document.getElementById("gui-file-input");
+      const guiDropZone = document.getElementById("gui-drop-zone");
+      const startBtn = document.getElementById("btn-start-engine");
+      const fileLabel = document.getElementById("gui-file-label");
+
+      guiDropZone.addEventListener('dragover', (e) => { e.preventDefault(); guiDropZone.classList.add('dragover'); });
+      guiDropZone.addEventListener('dragleave', (e) => { e.preventDefault(); guiDropZone.classList.remove('dragover'); });
+      guiDropZone.addEventListener('drop', (e) => {
+        e.preventDefault();
+        guiDropZone.classList.remove('dragover');
+        if (e.dataTransfer.files.length > 0) handleFileSelection(e.dataTransfer.files[0], fileLabel, startBtn);
+      });
+      guiFileInput.addEventListener("change", (e) => {
+        if (e.target.files.length > 0) handleFileSelection(e.target.files[0], fileLabel, startBtn);
+      });
+
+      startBtn.addEventListener("click", async () => {
+        const engine = document.getElementById("engine-selector").value;
+        const quality = document.getElementById("quality-selector").value;
+        
+        document.getElementById("startup-gui").style.opacity = "0";
+        setTimeout(() => document.getElementById("startup-gui").style.display = "none", 300);
+
+        if (engine === "ruffle") {
+          activeEngineMode = 'ruffle';
+          window.RufflePlayer.config.quality = quality;
+          await executeRuffleEngine();
+        } else {
+          activeEngineMode = 'native-js';
+          await executeNativeJSEngine(quality);
+        }
+      });
+
+      initNativeKeyListeners();
+      updateKeybindUI();
+      initErudaConsole();
+    });
+
+    async function handleFileSelection(file, labelElement, startBtnElement) {
+      if (!file.name.toLowerCase().endsWith('.swf')) return alert('Please upload a valid .SWF file.');
+      
+      // Generate a fresh session token on file selection
+      activeSessionKey = generateSessionToken();
+      currentSwfFile = file;
+      currentSwfBuffer = await file.arrayBuffer();
+      
+      currentSwfDataUrl = await new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onload = (e) => resolve(e.target.result);
+        reader.readAsDataURL(file);
+      });
+      
+      labelElement.textContent = `✅ Ready: ${file.name} (${(file.size / 1048576).toFixed(2)} MB)`;
+      labelElement.style.color = 'var(--accent-color)';
+      startBtnElement.disabled = false;
+    }
+
+    function openLauncherGUI() {
+      document.getElementById("startup-gui").style.display = "flex";
+      setTimeout(() => document.getElementById("startup-gui").style.opacity = "1", 10);
+    }
+
+    async function restartWithFreshSession() {
+      if (!currentSwfBuffer) return;
+      activeSessionKey = generateSessionToken(); // Refresh memory space key
+      isLoadingSwf = false;
+
+      if (activeEngineMode === 'ruffle') {
+        await executeRuffleEngine();
+      } else {
+        const quality = document.getElementById("quality-selector").value;
+        await executeNativeJSEngine(quality);
+      }
+    }
+
+    /* ---------------------------------------------------- */
+    /* ENGINE 1: RUFFLE WEBASSEMBLY LAUNCHER                */
+    /* ---------------------------------------------------- */
+    async function executeRuffleEngine() {
+      if (!currentSwfBuffer || isLoadingSwf) return;
+      isLoadingSwf = true;
+
+      document.getElementById("ruffle-container").classList.add("active");
+      document.getElementById("native-js-container").classList.remove("active");
+
+      const container = document.getElementById("ruffle-container");
+
+      if (rufflePlayer) {
+        try { if (typeof rufflePlayer.destroy === "function") rufflePlayer.destroy(); } 
+        catch (err) { console.warn("[Ruffle Lifecycle] Cleanup error:", err); }
+        rufflePlayer = null;
+        container.innerHTML = "";
+      }
+
+      await new Promise(resolve => setTimeout(resolve, 60));
+
+      try {
+        const ruffle = window.RufflePlayer.newest();
+        rufflePlayer = ruffle.createPlayer();
+        container.appendChild(rufflePlayer);
+
+        // Load Ruffle with a fully isolated memory scope key
+        await rufflePlayer.load({
+          data: currentSwfBuffer.slice(0),
+          autoplay: "on",
+          unmuteOverlay: "rendered",
+          allowScriptAccess: isScriptAccessAllowed,
+          storageKey: activeSessionKey
+        });
+        console.log(`[Ruffle Engine] File loaded with ephemeral session key: ${activeSessionKey}`);
+      } catch (err) {
+        console.error("[Ruffle Loader] Execution Failed:", err);
+      } finally {
+        isLoadingSwf = false;
+      }
+    }
+
+    /* ---------------------------------------------------- */
+    /* ENGINE 2: NATIVE JAVASCRIPT (SWF2JS) LAUNCHER        */
+    /* ---------------------------------------------------- */
+    async function executeNativeJSEngine(qualityLevel) {
+      if (!currentSwfDataUrl || isLoadingSwf) return;
+      
+      if (typeof swf2js === 'undefined') {
+          alert("The Pure JS Engine (swf2js) failed to load from network. Please check connection or switch to Ruffle.");
+          return;
+      }
+      
+      isLoadingSwf = true;
+
+      document.getElementById("native-js-container").classList.add("active");
+      document.getElementById("ruffle-container").classList.remove("active");
+
+      const container = document.getElementById("native-js-container");
+      container.innerHTML = "";
+
+      if (rufflePlayer) {
+        try { if (typeof rufflePlayer.destroy === "function") rufflePlayer.destroy(); } catch (e) {}
+        rufflePlayer = null;
+      }
+
+      try {
+        swf2js.load(currentSwfDataUrl, {
+          targetId: "native-js-container",
+          width: "100%",
+          height: "100%",
+          quality: qualityLevel
+        });
+        console.log("[Native Engine] swf2js initialized.");
+      } catch (err) {
+        console.error("[Native JS Loader] Execution Failed:", err);
+      } finally {
+        isLoadingSwf = false;
+      }
+    }
+
+    /* ---------------------------------------------------- */
+    /* UNIVERSAL VIRTUAL KEYBOARD CONTROLLER                */
+    /* ---------------------------------------------------- */
+    function registerKeyDown(key, code, keyCode, pointerId = null) {
+      if (activeKeyCodes.has(keyCode)) return true;
+      if (activeKeyCodes.size >= MAX_CONCURRENT_KEYS) return false;
+
+      activeKeyCodes.add(keyCode);
+      if (pointerId !== null) activePointerMap.set(pointerId, keyCode);
+
+      updateActiveKeyMeter();
+      dispatchEngineKey("keydown", key, code, keyCode);
+      return true;
+    }
+
+    function registerKeyUp(key, code, keyCode, pointerId = null) {
+      if (!activeKeyCodes.has(keyCode)) return;
+
+      activeKeyCodes.delete(keyCode);
+      if (pointerId !== null) activePointerMap.delete(pointerId);
+
+      updateActiveKeyMeter();
+      dispatchEngineKey("keyup", key, code, keyCode);
+    }
+
+    function updateActiveKeyMeter() {
+      const badge = document.getElementById("active-key-count");
+      badge.textContent = `${activeKeyCodes.size} / ${MAX_CONCURRENT_KEYS}`;
+      badge.style.color = activeKeyCodes.size >= MAX_CONCURRENT_KEYS ? "#ef4444" : "var(--accent-color)";
+    }
+
+    function dispatchEngineKey(type, key, code, keyCode) {
+      const eventInit = {
+        key: key, code: code, keyCode: keyCode, which: keyCode,
+        charCode: type === "keydown" && key.length === 1 ? key.charCodeAt(0) : 0,
+        bubbles: true, cancelable: true, composed: true
+      };
+      const event = new KeyboardEvent(type, eventInit);
+
+      if (activeEngineMode === 'ruffle' && rufflePlayer) {
+        const canvas = rufflePlayer.querySelector("canvas") || (rufflePlayer.shadowRoot && rufflePlayer.shadowRoot.querySelector("canvas"));
+        if (canvas) canvas.dispatchEvent(event);
+        rufflePlayer.dispatchEvent(event);
+      } 
+      else if (activeEngineMode === 'native-js') {
+        const nativeCanvas = document.getElementById("native-js-container").querySelector("canvas");
+        if (nativeCanvas) nativeCanvas.dispatchEvent(event);
+      }
+      
+      window.dispatchEvent(event);
+    }
+
+    function initNativeKeyListeners() {
+      const buttons = document.querySelectorAll(".vk-btn");
+      buttons.forEach(btn => {
+        btn.addEventListener("pointerdown", (e) => {
+          e.preventDefault();
+          let key, code, keyCode;
+          const bindName = btn.getAttribute("data-bind");
+          if (bindName) {
+            const bind = customKeybinds[bindName];
+            if (!bind) return;
+            key = bind.key; code = bind.code; keyCode = bind.keyCode;
+          } else {
+            key = btn.getAttribute("data-key"); code = btn.getAttribute("data-code"); keyCode = parseInt(btn.getAttribute("data-keycode"), 10);
+          }
+          if (registerKeyDown(key, code, keyCode, e.pointerId)) btn.classList.add("pressed");
+        });
+
+        const releaseHandler = (e) => {
+          e.preventDefault();
+          let key, code, keyCode;
+          const bindName = btn.getAttribute("data-bind");
+          if (bindName) {
+            const bind = customKeybinds[bindName];
+            if (!bind) return;
+            key = bind.key; code = bind.code; keyCode = bind.keyCode;
+          } else {
+            key = btn.getAttribute("data-key"); code = btn.getAttribute("data-code"); keyCode = parseInt(btn.getAttribute("data-keycode"), 10);
+          }
+          btn.classList.remove("pressed");
+          registerKeyUp(key, code, keyCode, e.pointerId);
+        };
+
+        ["pointerup", "pointercancel", "pointerleave"].forEach(evt => btn.addEventListener(evt, releaseHandler));
+      });
+    }
+
+    /* ---------------------------------------------------- */
+    /* SETTINGS, CONSOLE & UTILS                            */
+    /* ---------------------------------------------------- */
+    function initErudaConsole() {
+      if (typeof eruda !== 'undefined' && !erudaInitialized) {
+        eruda.init({
+          container: document.getElementById('eruda-container'),
+          tool: ['console', 'elements', 'network', 'resources', 'info'],
+          useShadowDom: true,
+          autoScale: true
+        });
+        eruda.show();
+        erudaInitialized = true;
+      }
+    }
+
+    async function toggleScriptAccess(enabled) {
+      isScriptAccessAllowed = enabled;
+      window.RufflePlayer.config.allowScriptAccess = enabled;
+      if (currentSwfBuffer && activeEngineMode === 'ruffle') {
+        await executeRuffleEngine();
+      }
+    }
+
+    let activeListeningBind = null;
+    function listenForKeybind(bindName, buttonEl) {
+      if (activeListeningBind) return;
+      activeListeningBind = bindName;
+      buttonEl.classList.add("listening");
+      buttonEl.textContent = "Press Key...";
+
+      const keyHandler = (e) => {
+        e.preventDefault(); e.stopPropagation();
+        customKeybinds[bindName] = { key: e.key, code: e.code, keyCode: e.keyCode || e.which };
+        buttonEl.classList.remove("listening");
+        buttonEl.textContent = e.code || e.key;
+        activeListeningBind = null;
+        window.removeEventListener("keydown", keyHandler, true);
+      };
+      window.addEventListener("keydown", keyHandler, true);
+    }
+
+    function resetDefaultKeybinds() {
+      customKeybinds = JSON.parse(JSON.stringify(DEFAULT_KEYBINDS));
+      updateKeybindUI();
+    }
+
+    function updateKeybindUI() {
+      for (const [bindName, config] of Object.entries(customKeybinds)) {
+        const btn = document.getElementById(`bind-${bindName}`);
+        if (btn) btn.textContent = config.code || config.key;
+      }
+    }
+
+    function switchControlMode(mode, event) {
+      const panels = {
+        keyboard: document.getElementById("keyboard-panel"),
+        dpad: document.getElementById("dpad-panel"),
+        settings: document.getElementById("settings-panel"),
+        console: document.getElementById("console-panel")
+      };
+
+      const controlsWrapper = document.getElementById("controls-wrapper");
+      document.querySelectorAll(".toggle-btn").forEach(btn => btn.classList.remove("active"));
+      event.target.classList.add("active");
+
+      Object.values(panels).forEach(p => p.classList.remove("active"));
+      controlsWrapper.style.display = "block";
+
+      if (panels[mode]) {
+        panels[mode].classList.add("active");
+      } else {
+        controlsWrapper.style.display = "none";
+      }
+    }
+  </script>
+</body>
+</html>
